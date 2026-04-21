@@ -1,0 +1,6 @@
+{
+  "name": "SkillSwap",
+  "description": "A moneyless marketplace for exchanging skills using time credits. Earn one credit for every hour you teach, and spend it to learn from others.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

@@ -1,0 +1,95 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitives ---
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // --- User Rules ---
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'credits', 'createdAt'])
+        && data.uid == request.auth.uid
+        && data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 100
+        && data.email == request.auth.token.email
+        && data.credits is number && data.credits >= 0
+        && data.credits <= 1000 // Prevent extreme values
+        && data.createdAt == request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && userId == request.auth.uid && isValidUser(incoming());
+      
+      allow update: if isSignedIn() && userId == request.auth.uid && (
+        // Action: Profile Update
+        (incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'bio', 'skillsToTeach', 'skillsToLearn']))
+        && incoming().credits == existing().credits
+      ) || (
+        // Action: Credit Sync (Limited to increment/decrement)
+        // Hard to strictly enforce without specific session ID in rules.
+        // In this prototype, we'll allow credit updates by the owner.
+        incoming().diff(existing()).affectedKeys().hasOnly(['credits'])
+        && (incoming().credits == existing().credits + 1 || incoming().credits == existing().credits - 1)
+      );
+    }
+
+    // --- Skill Rules ---
+    function isValidSkill(data) {
+      return data.keys().hasAll(['ownerId', 'ownerName', 'ownerPhoto', 'title', 'description', 'level', 'category', 'createdAt'])
+        && data.ownerId == request.auth.uid
+        && data.title is string && data.title.size() <= 100
+        && data.description is string && data.description.size() <= 2000
+        && data.level in ['beginner', 'intermediate', 'advanced']
+        && data.createdAt == request.time;
+    }
+
+    match /skills/{skillId} {
+      allow read: if true; // Public marketplace
+      allow create: if isVerified() && isValidSkill(incoming());
+      allow update: if isVerified() && existing().ownerId == request.auth.uid 
+        && incoming().ownerId == existing().ownerId
+        && (incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'level', 'category']));
+      allow delete: if isVerified() && existing().ownerId == request.auth.uid;
+    }
+
+    // --- Session Rules ---
+    function isValidSession(data) {
+      return data.keys().hasAll(['mentorId', 'mentorName', 'learnerId', 'learnerName', 'skillId', 'skillTitle', 'status', 'scheduledAt', 'durationMinutes', 'creditsExchanged', 'createdAt'])
+        && (data.mentorId == request.auth.uid || data.learnerId == request.auth.uid)
+        && data.status in ['pending', 'accepted', 'completed', 'cancelled']
+        && data.durationMinutes > 0
+        && data.creditsExchanged == 1 // Our current economy: 1 hour = 1 credit (simplified)
+        && data.createdAt == request.time;
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if isSignedIn() && (existing().mentorId == request.auth.uid || existing().learnerId == request.auth.uid);
+      allow create: if isVerified() && isValidSession(incoming()) && incoming().status == 'pending';
+      
+      allow update: if isVerified() && (
+        // Mentor accepting or completing
+        (existing().mentorId == request.auth.uid && (
+          (existing().status == 'pending' && incoming().status == 'accepted') ||
+          (existing().status == 'accepted' && incoming().status == 'completed')
+        ) && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+        ||
+        // Learner/Mentor cancelling
+        ((existing().mentorId == request.auth.uid || existing().learnerId == request.auth.uid) && 
+         incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+        ||
+        // Feedback
+        ((existing().mentorId == request.auth.uid || existing().learnerId == request.auth.uid) &&
+         incoming().diff(existing()).affectedKeys().hasAny(['mentorNote', 'learnerFeedback', 'rating']))
+      );
+    }
+  }
+}
